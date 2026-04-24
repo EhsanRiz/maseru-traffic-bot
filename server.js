@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express from 'express';
 import Anthropic from '@anthropic-ai/sdk';
 import cors from 'cors';
@@ -14,7 +15,7 @@ const __dirname = path.dirname(__filename);
 const config = {
   port: process.env.PORT || 3000,
   anthropicApiKey: process.env.ANTHROPIC_API_KEY,
-  streamUrl: 'https://5c50a1c26792b.streamlock.net/live/ngrp:MaseruBridge.stream_all/playlist.m3u8',
+  streamUrl: process.env.STREAM_URL || 'https://5c50a1c26792b.streamlock.net/live/ngrp:MaseruBridgeLS.stream_all/playlist.m3u8',
   captureInterval: 180000,       // Capture every 3 minutes
   cacheTimeout: 180000,         // Cache analysis for 3 minutes
   maxBufferSize: 12,            // Keep last 12 frames (6 minutes of history)
@@ -22,7 +23,15 @@ const config = {
   supabaseUrl: process.env.SUPABASE_URL,
   supabaseServiceKey: process.env.SUPABASE_SERVICE_KEY,
   detectorUrl: process.env.DETECTOR_URL || 'https://traffic-detector-jzbg.onrender.com',
+  publicUrl: process.env.PUBLIC_URL || '',
+  plausibleDomain: process.env.PLAUSIBLE_DOMAIN || '',
 };
+
+if (!config.anthropicApiKey) {
+  console.error('❌ ANTHROPIC_API_KEY is required. Set it in your environment or .env file.');
+  console.error('   Get a key at https://console.anthropic.com/');
+  process.exit(1);
+}
 
 const anthropic = new Anthropic({
   apiKey: config.anthropicApiKey,
@@ -1647,11 +1656,22 @@ app.get('/api/frames', async (req, res) => {
 });
 
 app.get('/api/health', (req, res) => {
+  const latest = screenshotBuffer.length > 0 ? screenshotBuffer[screenshotBuffer.length - 1] : null;
+  const lastFrameAgeSec = latest ? Math.round((Date.now() - latest.timestamp) / 1000) : null;
+  // browserConnected retained for frontend back-compat; semantically = "have we got a fresh-ish frame?"
+  const browserConnected = lastFrameAgeSec !== null && lastFrameAgeSec < MAX_FRAME_AGE_MS / 1000;
+
   res.json({
-    status: 'ok',
+    status: browserConnected ? 'ok' : 'degraded',
+    ok: browserConnected,
+    browserConnected,
     bufferSize: screenshotBuffer.length,
-    lastCapture: screenshotBuffer.length > 0 ? new Date(screenshotBuffer[screenshotBuffer.length - 1].timestamp).toISOString() : 'none',
-    uptime: process.uptime(),
+    lastFrameAgeSec,
+    lastCapture: latest ? new Date(latest.timestamp).toISOString() : null,
+    supabaseConnected: !!supabase,
+    detectorUrl: config.detectorUrl,
+    plausibleDomain: config.plausibleDomain || null,
+    uptime: Math.round(process.uptime()),
   });
 });
 
@@ -2470,6 +2490,156 @@ app.get('/admin', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'admin.html'));
 });
 
+// =============================================
+// SHAREABLE ROUTES (for WhatsApp / social traction)
+// =============================================
+
+// Derive a one-line headline from the most recent cached analysis
+function getShareHeadline() {
+  const cached = responseCache.status;
+  if (!cached || (Date.now() - cached.timestamp) > CACHE_TTL) {
+    return { emoji: '📡', text: 'Checking Maseru Bridge traffic…' };
+  }
+  const msg = (cached.response?.message || '').toLowerCase();
+  if (/severe|backed\s*up/.test(msg)) return { emoji: '🔴', text: 'Heavy queue at Maseru Bridge — expect delays' };
+  if (/heavy/.test(msg)) return { emoji: '🟠', text: 'Busy at Maseru Bridge right now' };
+  if (/moderate/.test(msg)) return { emoji: '🟡', text: 'Moderate traffic at Maseru Bridge' };
+  if (/light|clear|quiet|no queue/.test(msg)) return { emoji: '🟢', text: 'Moving freely at Maseru Bridge' };
+  return { emoji: '🌉', text: 'Maseru Bridge live traffic' };
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function plausibleTag() {
+  if (!config.plausibleDomain) return '';
+  return `<script defer data-domain="${escapeHtml(config.plausibleDomain)}" src="https://plausible.io/js/script.js"></script>`;
+}
+
+// /og.jpg — the image used in WhatsApp / Twitter / Slack link previews.
+// Returns the latest camera frame as JPEG. Cached 60s to absorb viral-share traffic.
+app.get('/og.jpg', (req, res) => {
+  const frame = preservedFrames.bridge || preservedFrames.wide || preservedFrames.processing;
+  const img = getLatestScreenshot() || (frame && frame.screenshot);
+  if (!img) {
+    return res.status(503).send('Camera frame not available yet');
+  }
+  res.set('Content-Type', 'image/jpeg');
+  res.set('Cache-Control', 'public, max-age=60, s-maxage=60');
+  res.send(img);
+});
+
+// /status — lightweight, shareable, server-rendered status page with live OG preview.
+// Works without JS. This is the URL meant to be pasted into WhatsApp groups.
+app.get('/status', async (req, res) => {
+  const headline = getShareHeadline();
+  const title = `${headline.emoji} ${headline.text}`;
+  const description = 'Live AI-powered traffic check for the Maseru Bridge border crossing (Lesotho ↔ South Africa). Updated every few minutes.';
+  const base = config.publicUrl || `${req.protocol}://${req.get('host')}`;
+  const ogImage = `${base}/og.jpg?t=${Math.floor(Date.now() / 60000)}`; // rotate hourly-ish for cache busting in crawlers
+
+  const latest = screenshotBuffer.length > 0 ? screenshotBuffer[screenshotBuffer.length - 1] : null;
+  const lastUpdated = latest
+    ? `${Math.round((Date.now() - latest.timestamp) / 1000)}s ago`
+    : 'waiting for first frame';
+
+  res.set('Cache-Control', 'public, max-age=30');
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHtml(title)}</title>
+  <meta name="description" content="${escapeHtml(description)}">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="${escapeHtml(title)}">
+  <meta property="og:description" content="${escapeHtml(description)}">
+  <meta property="og:image" content="${escapeHtml(ogImage)}">
+  <meta property="og:image:width" content="800">
+  <meta property="og:image:height" content="450">
+  <meta property="og:url" content="${escapeHtml(base)}/status">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="${escapeHtml(title)}">
+  <meta name="twitter:description" content="${escapeHtml(description)}">
+  <meta name="twitter:image" content="${escapeHtml(ogImage)}">
+  <meta http-equiv="refresh" content="60">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+  ${plausibleTag()}
+  <style>
+    :root { --bg:#0a0f1a; --card:#1a2332; --accent:#3b82f6; --text:#f1f5f9; --muted:#94a3b8; --border:#2a3a4a; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'DM Sans', system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; padding: 1.5rem; }
+    .wrap { max-width: 640px; margin: 0 auto; }
+    .headline { font-size: 1.5rem; font-weight: 700; margin-bottom: 0.5rem; letter-spacing: -0.02em; }
+    .sub { color: var(--muted); font-size: 0.95rem; margin-bottom: 1.25rem; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 16px; overflow: hidden; margin-bottom: 1rem; }
+    .card img { display: block; width: 100%; height: auto; }
+    .meta { padding: 0.75rem 1rem; display: flex; justify-content: space-between; align-items: center; font-size: 0.8rem; color: var(--muted); border-top: 1px solid var(--border); }
+    .cta { display: inline-block; background: var(--accent); color: white; padding: 0.75rem 1.25rem; border-radius: 10px; text-decoration: none; font-weight: 600; font-size: 0.95rem; }
+    .footer { margin-top: 2rem; color: var(--muted); font-size: 0.8rem; text-align: center; line-height: 1.6; }
+    .footer a { color: var(--accent); text-decoration: none; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="headline">${escapeHtml(title)}</div>
+    <div class="sub">Maseru Bridge · Lesotho ↔ South Africa</div>
+    <div class="card">
+      <img src="/og.jpg?t=${Date.now()}" alt="Live camera view of Maseru Bridge">
+      <div class="meta">
+        <span>Last frame: ${escapeHtml(lastUpdated)}</span>
+        <span>Auto-refresh 60s</span>
+      </div>
+    </div>
+    <a class="cta" href="/">Ask the bot →</a>
+    <div class="footer">
+      AI estimate from live camera. Conditions change quickly.<br>
+      Camera by <a href="https://webcast.etl.co.ls">Econet Telecom Lesotho</a> · Built by <a href="https://4dcs.co.za">4D Climate Solutions</a>
+    </div>
+  </div>
+</body>
+</html>`);
+});
+
+// /embed — minimal iframe-able widget (for partner news sites, embassy, tourism pages)
+app.get('/embed', (req, res) => {
+  const headline = getShareHeadline();
+  const title = `${headline.emoji} ${headline.text}`;
+  const base = config.publicUrl || `${req.protocol}://${req.get('host')}`;
+  res.set('Cache-Control', 'public, max-age=30');
+  res.set('X-Frame-Options', 'ALLOWALL');
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Maseru Bridge · Live</title>
+  <meta http-equiv="refresh" content="60">
+  ${plausibleTag()}
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #0a0f1a; color: #f1f5f9; }
+    a { display: block; text-decoration: none; color: inherit; }
+    .box { position: relative; }
+    .box img { display: block; width: 100%; height: auto; }
+    .overlay { position: absolute; bottom: 0; left: 0; right: 0; padding: 8px 12px; background: linear-gradient(transparent, rgba(0,0,0,0.85)); font-size: 13px; font-weight: 600; }
+    .brand { position: absolute; top: 6px; right: 8px; font-size: 10px; color: rgba(255,255,255,0.85); background: rgba(0,0,0,0.4); padding: 2px 6px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <a href="${escapeHtml(base)}/status" target="_top">
+    <div class="box">
+      <img src="/og.jpg?t=${Date.now()}" alt="Maseru Bridge live">
+      <div class="brand">maseru bridge · live</div>
+      <div class="overlay">${escapeHtml(title)}</div>
+    </div>
+  </a>
+</body>
+</html>`);
+});
+
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
@@ -2477,9 +2647,21 @@ app.get('/', (req, res) => {
 // Background capture
 async function startBackgroundCapture() {
   console.log('🔄 Starting background capture...');
-  
-  await captureFrame();
-  
+
+  // Retry initial capture up to 3 times (stream or ffmpeg may need a moment on cold start)
+  const attemptDelays = [0, 10_000, 30_000];
+  for (let attempt = 0; attempt < attemptDelays.length; attempt++) {
+    if (attemptDelays[attempt] > 0) {
+      console.log(`⏳ Retrying initial capture in ${attemptDelays[attempt] / 1000}s (attempt ${attempt + 1}/${attemptDelays.length})`);
+      await new Promise(r => setTimeout(r, attemptDelays[attempt]));
+    }
+    await captureFrame();
+    if (screenshotBuffer.length > 0) break;
+  }
+  if (screenshotBuffer.length === 0) {
+    console.error('⚠️ No frame captured after 3 attempts — continuing; background interval will keep retrying');
+  }
+
   setInterval(async () => {
     await captureFrame();
   }, config.captureInterval);

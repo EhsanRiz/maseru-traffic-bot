@@ -1,18 +1,15 @@
-FROM ghcr.io/puppeteer/puppeteer:23.4.0
+FROM node:20-slim
 
-USER root
 WORKDIR /app
 
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
 COPY package*.json ./
-
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
-
-RUN npm install --only=production
+RUN npm install --omit=dev
 
 COPY . .
-
-RUN chown -R pptruser:pptruser /app
-USER pptruser
 
 EXPOSE 3000
 ENV PORT=3000

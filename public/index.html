@@ -4,6 +4,29 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Maseru Bridge Traffic Bot</title>
+  <meta name="description" content="Live AI-powered traffic check for the Maseru Bridge border crossing (Lesotho ↔ South Africa). Ask anything about the queue, wait times, or conditions.">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="🌉 Maseru Bridge — Live Traffic">
+  <meta property="og:description" content="Live AI-powered traffic check for the Maseru Bridge border crossing. Updated every few minutes.">
+  <meta property="og:image" content="/og.jpg">
+  <meta property="og:image:width" content="800">
+  <meta property="og:image:height" content="450">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="🌉 Maseru Bridge — Live Traffic">
+  <meta name="twitter:description" content="Live AI-powered traffic check for the Maseru Bridge border crossing.">
+  <meta name="twitter:image" content="/og.jpg">
+  <script>
+    // Lazy-load Plausible if the server exposes a configured domain via /api/health.
+    fetch('/api/health').then(r => r.json()).then(h => {
+      if (h && h.plausibleDomain) {
+        const s = document.createElement('script');
+        s.defer = true;
+        s.dataset.domain = h.plausibleDomain;
+        s.src = 'https://plausible.io/js/script.js';
+        document.head.appendChild(s);
+      }
+    }).catch(() => {});
+  </script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">

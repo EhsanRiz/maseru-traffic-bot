@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: maseru-traffic-bot
+    env: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: STREAM_URL
+        value: https://5c50a1c26792b.streamlock.net/live/ngrp:MaseruBridgeLS.stream_all/playlist.m3u8
+      - key: DETECTOR_URL
+        value: https://traffic-detector-jzbg.onrender.com
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: PUBLIC_URL
+        sync: false
+      - key: PLAUSIBLE_DOMAIN
+        sync: false
